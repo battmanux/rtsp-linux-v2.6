@@ -46,8 +46,10 @@ struct ip_ct_rtsp_expect
 {
     u_int32_t   len;        /* length of header block */
     portblock_t pbtype;     /* Type of port block that was requested */
-    u_int16_t   loport;     /* Port that was requested, low or first */
-    u_int16_t   hiport;     /* Port that was requested, high or second */
+    u_int16_t   losport;     /* Port that was requested for client, low or first */
+    u_int16_t   hisport;     /* Port that was requested for client, high or second */
+    u_int16_t   locport;     /* Port that was requested for server, low or first */
+    u_int16_t   hicport;     /* Port that was requested for server, high or second */
 #if 0
     uint        method;     /* RTSP method */
     uint        cseq;       /* CSeq from request */
