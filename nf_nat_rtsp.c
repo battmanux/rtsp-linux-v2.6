@@ -148,7 +148,7 @@ rtsp_mangle_tran(enum ip_conntrack_info ctinfo,
 #else
 	u_int32_t  newip;
 #endif
-	u_int16_t loport, hiport;
+	u_int16_t locport, hicport;
 	uint      off = 0;
 	uint      diff;		   /* Number of bytes we removed */
 
@@ -196,30 +196,30 @@ rtsp_mangle_tran(enum ip_conntrack_info ctinfo,
 			   : sprintf(szextaddr, "%pI4", &newip);
 	pr_debug("stunaddr=%s (%s)\n", szextaddr, (extip?"forced":"auto"));
 #endif
-	hiport = 0;
+	hicport = 0;
 	rbuf1len = rbufalen = 0;
 	switch (prtspexp->pbtype) {
 	case pb_single:
-		for (loport = prtspexp->loport; loport != 0; loport++) { /* XXX: improper wrap? */
-			rtp_t->dst.u.udp.port = htons(loport);
+		for (locport = prtspexp->locport; locport != 0; locport++) { /* XXX: improper wrap? */
+			rtp_t->dst.u.udp.port = htons(locport);
 			if (nf_ct_expect_related(rtp_exp) == 0) {
-				pr_debug("using port %hu\n", loport);
+				pr_debug("using port %hu\n", locport);
 				break;
 			}
 		}
-		if (loport != 0) {
-			rbuf1len = sprintf(rbuf1, "%hu", loport);
-			rbufalen = sprintf(rbufa, "%hu", loport);
+		if (locport != 0) {
+			rbuf1len = sprintf(rbuf1, "%hu", locport);
+			rbufalen = sprintf(rbufa, "%hu", locport);
 		}
 		break;
 	case pb_range:
-		for (loport = prtspexp->loport; loport != 0; loport += 2) { /* XXX: improper wrap? */
-			rtp_t->dst.u.udp.port = htons(loport);
+		for (locport = prtspexp->locport; locport != 0; locport += 2) { /* XXX: improper wrap? */
+			rtp_t->dst.u.udp.port = htons(locport);
 			if (nf_ct_expect_related(rtp_exp) != 0) {
 				continue;
 			}
-			hiport = loport + 1;
-			rtcp_exp->tuple.dst.u.udp.port = htons(hiport);
+			hicport = locport + 1;
+			rtcp_exp->tuple.dst.u.udp.port = htons(hicport);
 			if (nf_ct_expect_related(rtcp_exp) != 0) {
 				nf_ct_unexpect_related(rtp_exp);
 				continue;
@@ -235,30 +235,30 @@ rtsp_mangle_tran(enum ip_conntrack_info ctinfo,
 				 ntohs(rtcp_exp->tuple.dst.u.udp.port));
 			break;
 		}
-		if (loport != 0) {
-			rbuf1len = sprintf(rbuf1, "%hu", loport);
-			rbufalen = sprintf(rbufa, "%hu-%hu", loport, hiport);
+		if (locport != 0) {
+			rbuf1len = sprintf(rbuf1, "%hu", locport);
+			rbufalen = sprintf(rbufa, "%hu-%hu", locport, hicport);
 		}
 		break;
 	case pb_discon:
-		for (loport = prtspexp->loport; loport != 0; loport++) { /* XXX: improper wrap? */
-			rtp_t->dst.u.udp.port = htons(loport);
+		for (locport = prtspexp->locport; locport != 0; locport++) { /* XXX: improper wrap? */
+			rtp_t->dst.u.udp.port = htons(locport);
 			if (nf_ct_expect_related(rtp_exp) == 0) {
-				pr_debug("using port %hu (1 of 2)\n", loport);
+				pr_debug("using port %hu (1 of 2)\n", locport);
 				break;
 			}
 		}
-		for (hiport = prtspexp->hiport; hiport != 0; hiport++) { /* XXX: improper wrap? */
-			rtp_t->dst.u.udp.port = htons(hiport);
+		for (hicport = prtspexp->hicport; hicport != 0; hicport++) { /* XXX: improper wrap? */
+			rtp_t->dst.u.udp.port = htons(hicport);
 			if (nf_ct_expect_related(rtp_exp) == 0) {
-				pr_debug("using port %hu (2 of 2)\n", hiport);
+				pr_debug("using port %hu (2 of 2)\n", hicport);
 				break;
 			}
 		}
-		if (loport != 0 && hiport != 0) {
-			rbuf1len = sprintf(rbuf1, "%hu", loport);
-			rbufalen = sprintf(rbufa, hiport == loport+1 ?
-					   "%hu-%hu":"%hu/%hu", loport, hiport);
+		if (locport != 0 && hicport != 0) {
+			rbuf1len = sprintf(rbuf1, "%hu", locport);
+			rbufalen = sprintf(rbufa, hicport == locport+1 ?
+					   "%hu-%hu":"%hu/%hu", locport, hicport);
 		}
 		break;
 	}
@@ -361,7 +361,7 @@ rtsp_mangle_tran(enum ip_conntrack_info ctinfo,
 				numlen = nf_strtou16(ptran+off, &port);
 				off += numlen;
 				origlen += numlen;
-				if (port != prtspexp->loport) {
+				if (port != prtspexp->locport) {
 					pr_debug("multiple ports found, port %hu ignored\n", port);
 				} else {
 					if (ptran[off] == '-' || ptran[off] == '/') {
@@ -474,7 +474,7 @@ help_out(struct sk_buff *skb, enum ip_conntrack_info ctinfo,
 #else
 			rtp_exp->saved_ip = saddr;
 #endif
-			rtp_exp->saved_proto.udp.port = htons(prtspexp->loport);
+			rtp_exp->saved_proto.udp.port = htons(prtspexp->locport);
 			rtp_exp->dir = !dir;
 			if (rtcp_exp) {
 				rtcp_exp->expectfn = nf_nat_rtsp_expected;
@@ -483,7 +483,7 @@ help_out(struct sk_buff *skb, enum ip_conntrack_info ctinfo,
 #else
 				rtcp_exp->saved_ip = saddr;
 #endif
-				rtcp_exp->saved_proto.udp.port = htons(prtspexp->hiport);
+				rtcp_exp->saved_proto.udp.port = htons(prtspexp->hicport);
 				rtcp_exp->dir = !dir;
 			}
 			get_skb_tcpdata(skb, &ptcp, &tcplen);
