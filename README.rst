@@ -1,3 +1,12 @@
+This Branch:
+============
+This branch is the result of modifications that I made so that the ALG works with VLC over multiples NAT:
+[Client]-->[ROUTER A]--->[ROUTER B]--->[Server]
+Router A is doing double NAT (SRC and DST are changed both ways)
+Router B is doing DST NAT (Server IP changes only)
+Router A and B will forward packets only if they are identifyed as related to and parent tcp.dport=554 connection.
+
+
 Disclaimer: 
 ===========
 
