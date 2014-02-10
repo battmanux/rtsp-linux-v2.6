@@ -214,38 +214,75 @@ rtsp_parse_transport(char* ptran, uint tranlen,
 				off += 12;
 				numlen = nf_strtou16(ptran+off, &port);
 				off += numlen;
-				if (prtspexp->loport != 0 && prtspexp->loport != port)
+				if (prtspexp->locport != 0 && prtspexp->locport != port)
 					pr_debug("multiple ports found, port %hu ignored\n", port);
 				else {
 					pr_debug("lo port found : %hu\n", port);
-					prtspexp->loport = prtspexp->hiport = port;
+					prtspexp->locport = prtspexp->hicport = port;
 					if (ptran[off] == '-') {
 						off++;
 						numlen = nf_strtou16(ptran+off, &port);
 						off += numlen;
 						prtspexp->pbtype = pb_range;
-						prtspexp->hiport = port;
+						prtspexp->hicport = port;
 						
 						// If we have a range, assume rtp:
-						// loport must be even, hiport must be loport+1
-						if ((prtspexp->loport & 0x0001) != 0 ||
-						    prtspexp->hiport != prtspexp->loport+1) {
-							pr_debug("incorrect range: %hu-%hu, correcting\n",
-							       prtspexp->loport, prtspexp->hiport);
-							prtspexp->loport &= 0xfffe;
-							prtspexp->hiport = prtspexp->loport+1;
+						// locport must be even, hisport must be locport+1
+						if ((prtspexp->locport & 0x0001) != 0 ||
+						    prtspexp->hicport != prtspexp->locport+1) {
+							pr_debug("incorrect range: %hu-%hu, keep as is as VLC tend to do that\n",
+							       prtspexp->locport, prtspexp->hicport);
+							/* prtspexp->locport &= 0xfffe;
+							prtspexp->hicport = prtspexp->locport+1; */
 						}
 					} else if (ptran[off] == '/') {
 						off++;
 						numlen = nf_strtou16(ptran+off, &port);
 						off += numlen;
 						prtspexp->pbtype = pb_discon;
-						prtspexp->hiport = port;
+						prtspexp->hicport = port;
 					}
 					rc = 1;
 				}
 			}
-			
+			else if (strncmp(ptran+off, "server_port=", 12) == 0) {
+				u_int16_t   port;
+				uint        numlen;
+
+				off += 12;
+				numlen = nf_strtou16(ptran+off, &port);
+				off += numlen;
+				if (prtspexp->losport != 0 && prtspexp->losport != port)
+					pr_debug("multiple ports found, port %hu ignored\n", port);
+				else {
+					pr_debug("lo port found : %hu\n", port);
+					prtspexp->losport = prtspexp->hisport = port;
+					if (ptran[off] == '-') {
+						off++;
+						numlen = nf_strtou16(ptran+off, &port);
+						off += numlen;
+						prtspexp->pbtype = pb_range;
+						prtspexp->hisport = port;
+						
+						// If we have a range, assume rtp:
+						// losport must be even, hisport must be losport+1
+						if ((prtspexp->losport & 0x0001) != 0 ||
+						    prtspexp->hisport != prtspexp->losport+1) {
+							pr_debug("incorrect range: %hu-%hu, keep as is as VLC tend to do that\n",
+							       prtspexp->losport, prtspexp->hisport);
+						/*	prtspexp->losport &= 0xfffe;
+							prtspexp->hisport = prtspexp->losport+1; */
+						}
+					} else if (ptran[off] == '/') {
+						off++;
+						numlen = nf_strtou16(ptran+off, &port);
+						off += numlen;
+						prtspexp->pbtype = pb_discon;
+						prtspexp->hisport = port;
+					}
+					rc = 1;
+				}
+			}	
 			/*
 			 * Note we don't look for the destination parameter here.
 			 * If we are using NAT, the NAT module will handle it.  If not,
@@ -268,7 +305,7 @@ rtsp_parse_transport(char* ptran, uint tranlen,
 /* outbound packet: client->server */
 
 static inline int
-help_out(struct sk_buff *skb, unsigned char *rb_ptr, unsigned int datalen,
+help_out_orig(struct sk_buff *skb, unsigned char *rb_ptr, unsigned int datalen,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
 	 struct nf_conn *ct, enum ip_conntrack_info ctinfo,
 	 unsigned int protoff)
@@ -278,19 +315,15 @@ help_out(struct sk_buff *skb, unsigned char *rb_ptr, unsigned int datalen,
 {
 	struct ip_ct_rtsp_expect expinfo;
 	
-	int dir = CTINFO2DIR(ctinfo);   /* = IP_CT_DIR_ORIGINAL */
-	//struct  tcphdr* tcph = (void*)iph + iph->ihl * 4;
-	//uint    tcplen = pktlen - iph->ihl * 4;
 	char*   pdata = rb_ptr;
-	//uint    datalen = tcplen - tcph->doff * 4;
 	uint    dataoff = 0;
 	int ret = NF_ACCEPT;
 	
 	struct nf_conntrack_expect *rtp_exp;
 	struct nf_conntrack_expect *rtcp_exp = NULL;
 	
-	__be16 be_loport;
-	__be16 be_hiport;
+	__be16 be_locport;
+	__be16 be_hicport;
 	
 	typeof(nf_nat_rtsp_hook) nf_nat_rtsp;
 
@@ -327,16 +360,16 @@ help_out(struct sk_buff *skb, unsigned char *rb_ptr, unsigned int datalen,
 		if(translen)
 			rtsp_parse_transport(pdata+transoff, translen, &expinfo);
 
-		if (expinfo.loport == 0) {
+		if (expinfo.locport == 0) {
 			pr_debug("no udp transports found\n");
 			continue;   /* no udp transports found */
 		}
 
 		pr_debug("udp transport found, ports=(%d,%hu,%hu)\n",
-			 (int)expinfo.pbtype, expinfo.loport, expinfo.hiport);
+			 (int)expinfo.pbtype, expinfo.locport, expinfo.hicport);
 
 
-		be_loport = htons(expinfo.loport);
+		be_locport = htons(expinfo.locport);
 
 		rtp_exp = nf_ct_expect_alloc(ct);
 		if (rtp_exp == NULL) {
@@ -346,16 +379,16 @@ help_out(struct sk_buff *skb, unsigned char *rb_ptr, unsigned int datalen,
 
 		nf_ct_expect_init(rtp_exp, NF_CT_EXPECT_CLASS_DEFAULT,
 				  nf_ct_l3num(ct),
-				  &ct->tuplehash[!dir].tuple.src.u3,
-				  &ct->tuplehash[!dir].tuple.dst.u3,
-				  IPPROTO_UDP, NULL, &be_loport);
+				  &ct->tuplehash[IP_CT_DIR_REPLY].tuple.src.u3,
+				  &ct->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u3,
+				  IPPROTO_UDP, NULL, &be_locport);
 
-		rtp_exp->flags = 0;
+		rtp_exp->flags = NF_CT_EXPECT_PERMANENT;
 
 		if (expinfo.pbtype == pb_range) {
 			pr_debug("setup expectation for rtcp\n");
 
-			be_hiport = htons(expinfo.hiport);
+			be_hicport = htons(expinfo.hicport);
 			rtcp_exp = nf_ct_expect_alloc(ct);
 			if (rtcp_exp == NULL) {
 				ret = NF_DROP;
@@ -364,11 +397,11 @@ help_out(struct sk_buff *skb, unsigned char *rb_ptr, unsigned int datalen,
 
 			nf_ct_expect_init(rtcp_exp, NF_CT_EXPECT_CLASS_DEFAULT,
 					  nf_ct_l3num(ct),
-					  &ct->tuplehash[!dir].tuple.src.u3,
-					  &ct->tuplehash[!dir].tuple.dst.u3,
-					  IPPROTO_UDP, NULL, &be_hiport);
+					  &ct->tuplehash[IP_CT_DIR_REPLY].tuple.src.u3,
+					  &ct->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u3,
+					  IPPROTO_UDP, NULL,  &be_hicport);
 
-			rtcp_exp->flags = 0;
+			rtcp_exp->flags = NF_CT_EXPECT_PERMANENT;
 
 			pr_debug("expect_related %pI4:%u-%u-%pI4:%u-%u\n",
 				   &rtp_exp->tuple.src.u3.ip,
@@ -398,7 +431,156 @@ help_out(struct sk_buff *skb, unsigned char *rb_ptr, unsigned int datalen,
 		else {
 			if (nf_ct_expect_related(rtp_exp) == 0) {
 				if (rtcp_exp && nf_ct_expect_related(rtcp_exp) != 0) {
-					nf_ct_unexpect_related(rtp_exp);
+					//nf_ct_unexpect_related(rtp_exp);
+					pr_info("nf_conntrack_expect_related failed for rtcp\n");
+					ret = NF_DROP;
+				}
+			} else {
+				pr_info("nf_conntrack_expect_related failed for rtp\n");
+				ret = NF_DROP;
+			}
+		}
+		if (rtcp_exp) {
+			nf_ct_expect_put(rtcp_exp);
+		}
+out1:
+		nf_ct_expect_put(rtp_exp);
+		goto out;
+	}
+out:
+
+	return ret;
+}
+
+/* inbound packet: server->client */
+
+static inline int
+help_out_reply(struct sk_buff *skb, unsigned char *rb_ptr, unsigned int datalen,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
+	 struct nf_conn *ct, enum ip_conntrack_info ctinfo,
+	 unsigned int protoff)
+#else
+	 struct nf_conn *ct, enum ip_conntrack_info ctinfo)
+#endif
+{
+	struct ip_ct_rtsp_expect expinfo;
+	
+	char*   pdata = rb_ptr;
+	uint    dataoff = 0;
+	int ret = NF_ACCEPT;
+	
+	struct nf_conntrack_expect *rtp_exp;
+	struct nf_conntrack_expect *rtcp_exp = NULL;
+	
+	__be16 be_locport;
+	__be16 be_hicport;
+	__be16 be_losport;
+	__be16 be_hisport;
+	
+	typeof(nf_nat_rtsp_hook) nf_nat_rtsp;
+
+	memset(&expinfo, 0, sizeof(expinfo));
+	
+	while (dataoff < datalen) {
+		uint cmdoff = dataoff;
+		uint hdrsoff = 0;
+		uint hdrslen = 0;
+		uint cseqoff = 0;
+		uint cseqlen = 0;
+		uint transoff = 0;
+		uint translen = 0;
+		uint off;
+		
+		if (!rtsp_parse_message(pdata, datalen, &dataoff,
+					&hdrsoff, &hdrslen,
+					&cseqoff, &cseqlen,
+					&transoff, &translen))
+			break;      /* not a valid message */
+
+		if (strncmp(pdata+cmdoff, "RTSP/", 5) != 0)
+			continue;   /* not a RTSP response message */
+
+		pr_debug("found a RTSP message\n");
+
+		off = 0;
+		if(translen)
+			rtsp_parse_transport(pdata+transoff, translen, &expinfo);
+
+		if (expinfo.losport == 0) {
+			pr_debug("no udp transports found on the way back\n");
+			continue;   /* no udp transports found */
+		}
+
+		pr_debug("udp transport found, ports=(%d,%hu-%hu->%hu,%hu)\n",
+			 (int)expinfo.pbtype, expinfo.locport, expinfo.hicport, expinfo.losport, expinfo.hisport);
+
+
+		be_losport = htons(expinfo.losport);
+		be_locport = htons(expinfo.locport);
+		be_hisport = htons(expinfo.hisport);
+		be_hicport = htons(expinfo.hicport);
+
+		rtp_exp = nf_ct_expect_alloc(ct);
+		if (rtp_exp == NULL) {
+			ret = NF_DROP;
+			goto out;
+		}
+
+		nf_ct_expect_init(rtp_exp, NF_CT_EXPECT_CLASS_DEFAULT,
+				  nf_ct_l3num(ct),
+				  &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3,
+				  &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.u3,
+				  IPPROTO_UDP, NULL, &be_losport);
+
+		rtp_exp->flags = NF_CT_EXPECT_PERMANENT;
+
+		if (expinfo.pbtype == pb_range) {
+			pr_debug("setup expectation for rtcp on the way back\n");
+			
+			be_hisport = htons(expinfo.hisport);
+			rtcp_exp = nf_ct_expect_alloc(ct);
+			if (rtcp_exp == NULL) {
+				ret = NF_DROP;
+				goto out1;
+			}
+
+			nf_ct_expect_init(rtcp_exp, NF_CT_EXPECT_CLASS_DEFAULT,
+					  nf_ct_l3num(ct),
+					  &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3,
+					  &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.u3,
+					  IPPROTO_UDP, NULL, &be_hisport);
+
+			rtcp_exp->flags = NF_CT_EXPECT_PERMANENT;
+
+			pr_debug("expect_related %pI4:%u-%u-%pI4:%u-%u\n",
+				   &rtp_exp->tuple.src.u3.ip,
+				   ntohs(rtp_exp->tuple.src.u.udp.port),
+				   ntohs(rtcp_exp->tuple.src.u.udp.port),
+				   &rtp_exp->tuple.dst.u3.ip,
+				   ntohs(rtp_exp->tuple.dst.u.udp.port),
+				   ntohs(rtcp_exp->tuple.dst.u.udp.port));
+		} else {
+			pr_debug("expect_related %pI4:%u-%pI4:%u\n",
+					&rtp_exp->tuple.src.u3.ip,
+					ntohs(rtp_exp->tuple.src.u.udp.port),
+					&rtp_exp->tuple.dst.u3.ip,
+					ntohs(rtp_exp->tuple.dst.u.udp.port));
+		}
+
+		nf_nat_rtsp = rcu_dereference(nf_nat_rtsp_hook);
+		if (nf_nat_rtsp && ct->status & IPS_NAT_MASK)
+			/* pass the request off to the nat helper */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
+			ret = nf_nat_rtsp(skb, ctinfo, protoff, hdrsoff, hdrslen,
+					  &expinfo, rtp_exp, rtcp_exp);
+#else
+			ret = nf_nat_rtsp(skb, ctinfo, hdrsoff, hdrslen,
+					  &expinfo, rtp_exp, rtcp_exp);
+#endif
+		else {
+			if (nf_ct_expect_related(rtp_exp) == 0) {
+				if (rtcp_exp && nf_ct_expect_related(rtcp_exp) != 0) {
+					//nf_ct_unexpect_related(rtp_exp);
 					pr_info("nf_conntrack_expect_related failed for rtcp\n");
 					ret = NF_DROP;
 				}
@@ -474,13 +656,18 @@ static int help(struct sk_buff *skb, unsigned int protoff,
 	switch (CTINFO2DIR(ctinfo)) {
 	case IP_CT_DIR_ORIGINAL:
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
-		ret = help_out(skb, rb_ptr, datalen, ct, ctinfo, protoff);
+		ret = help_out_orig(skb, rb_ptr, datalen, ct, ctinfo, protoff);
 #else
-		ret = help_out(skb, rb_ptr, datalen, ct, ctinfo);
+		ret = help_out_orig(skb, rb_ptr, datalen, ct, ctinfo);
 #endif
 		break;
 	case IP_CT_DIR_REPLY:
 		pr_debug("IP_CT_DIR_REPLY\n");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
+		ret = help_out_reply(skb, rb_ptr, datalen, ct, ctinfo, protoff);
+#else
+		ret = help_out_reply(skb, rb_ptr, datalen, ct, ctinfo);
+#endif
 		/* inbound packet: server->client */
 		ret = NF_ACCEPT;
 		break;
