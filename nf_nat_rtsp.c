@@ -148,9 +148,11 @@ rtsp_mangle_tran(enum ip_conntrack_info ctinfo,
 #else
 	u_int32_t  newip;
 #endif
-	u_int16_t locport, hicport;
+	u_int16_t seekloport = 0;
+	u_int16_t seekhiport = 0;
 	uint      off = 0;
 	uint      diff;		   /* Number of bytes we removed */
+	int   dir = CTINFO2DIR(ctinfo);
 
 	struct nf_conn *ct = rtp_exp->master;
 	/* struct nf_conn *ct = nf_ct_get(skb, &ctinfo); */
@@ -177,7 +179,7 @@ rtsp_mangle_tran(enum ip_conntrack_info ctinfo,
 	SKIP_WSPACE(ptcp+tranoff, tranlen, off);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
-	newip = ct->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u3;
+	newip = ct->tuplehash[!dir].tuple.dst.u3;
 	rtp_t = &rtp_exp->tuple;
 	rtp_t->dst.u3 = newip;
 	if (rtcp_exp) {
@@ -186,7 +188,7 @@ rtsp_mangle_tran(enum ip_conntrack_info ctinfo,
 	extaddrlen = rtsp_sprintf_addr(ct, szextaddr, &newip, true); // FIXME handle extip
 	pr_debug("stunaddr=%s (auto)\n", szextaddr);
 #else
-	newip = ct->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u3.ip;
+	newip = ct->tuplehash[!dir].tuple.dst.u3.ip;
 	rtp_t = &rtp_exp->tuple;
 	rtp_t->dst.u3.ip = newip;
 	if (rtcp_exp) {
@@ -196,74 +198,98 @@ rtsp_mangle_tran(enum ip_conntrack_info ctinfo,
 			   : sprintf(szextaddr, "%pI4", &newip);
 	pr_debug("stunaddr=%s (%s)\n", szextaddr, (extip?"forced":"auto"));
 #endif
-	hicport = 0;
+	seekhiport = 0;
 	rbuf1len = rbufalen = 0;
+		
 	switch (prtspexp->pbtype) {
-	case pb_single:
-		for (locport = prtspexp->locport; locport != 0; locport++) { /* XXX: improper wrap? */
-			rtp_t->dst.u.udp.port = htons(locport);
-			if (nf_ct_expect_related(rtp_exp) == 0) {
-				pr_debug("using port %hu\n", locport);
-				break;
+		case pb_single:
+			for (seekloport = prtspexp->locport; seekloport != 0; seekloport++) { /* XXX: improper wrap? */
+				if ( dir == IP_CT_DIR_ORIGINAL ) 
+					rtp_t->dst.u.udp.port = htons(seekloport);
+				else
+					rtp_t->src.u.udp.port = htons(seekloport);
+				if (nf_ct_expect_related(rtp_exp) == 0) {
+					pr_debug("using port %hu\n", seekloport);
+					seekloport = 0;
+					break;
+				}
 			}
-		}
-		if (locport != 0) {
-			rbuf1len = sprintf(rbuf1, "%hu", locport);
-			rbufalen = sprintf(rbufa, "%hu", locport);
-		}
-		break;
-	case pb_range:
-		for (locport = prtspexp->locport; locport != 0; locport += 2) { /* XXX: improper wrap? */
-			rtp_t->dst.u.udp.port = htons(locport);
-			if (nf_ct_expect_related(rtp_exp) != 0) {
-				continue;
-			}
-			hicport = locport + 1;
-			rtcp_exp->tuple.dst.u.udp.port = htons(hicport);
-			if (nf_ct_expect_related(rtcp_exp) != 0) {
-				nf_ct_unexpect_related(rtp_exp);
-				continue;
-			}
-
-			/* FIXME: invalid print in case of ipv6 */
-			pr_debug("nat expect_related %pI4:%u-%u-%pI4:%u-%u\n",
-				 &rtp_exp->tuple.src.u3.ip,
-				 ntohs(rtp_exp->tuple.src.u.udp.port),
-				 ntohs(rtcp_exp->tuple.src.u.udp.port),
-				 &rtp_exp->tuple.dst.u3.ip,
-				 ntohs(rtp_exp->tuple.dst.u.udp.port),
-				 ntohs(rtcp_exp->tuple.dst.u.udp.port));
 			break;
-		}
-		if (locport != 0) {
-			rbuf1len = sprintf(rbuf1, "%hu", locport);
-			rbufalen = sprintf(rbufa, "%hu-%hu", locport, hicport);
-		}
-		break;
-	case pb_discon:
-		for (locport = prtspexp->locport; locport != 0; locport++) { /* XXX: improper wrap? */
-			rtp_t->dst.u.udp.port = htons(locport);
-			if (nf_ct_expect_related(rtp_exp) == 0) {
-				pr_debug("using port %hu (1 of 2)\n", locport);
+		case pb_range:
+			for (seekloport = prtspexp->locport; seekloport != 0; seekloport += 2) { /* XXX: improper wrap? */
+				if ( dir == IP_CT_DIR_ORIGINAL ) 
+					rtp_t->dst.u.udp.port = htons(seekloport);
+				else
+					rtp_t->src.u.udp.port = htons(seekloport);
+				if (nf_ct_expect_related(rtp_exp) != 0) {
+					if ( dir == IP_CT_DIR_ORIGINAL ) 
+						rtp_t->src.u.udp.port++;
+					else
+						rtp_t->dst.u.udp.port++;
+					continue;
+				}
+				seekhiport = seekloport + 1;
+				if ( dir == IP_CT_DIR_ORIGINAL ) 
+					rtcp_exp->tuple.dst.u.udp.port = htons(seekhiport);
+				else
+					rtcp_exp->tuple.src.u.udp.port = htons(seekhiport);
+				if (nf_ct_expect_related(rtcp_exp) != 0) {
+					if ( dir == IP_CT_DIR_ORIGINAL ) 
+						rtcp_exp->tuple.src.u.udp.port++;
+					else
+						rtcp_exp->tuple.dst.u.udp.port++;
+					
+					continue;
+				}
+
+				/* FIXME: invalid print in case of ipv6 */
+				pr_debug("nat expect_related %pI4:%u-%u-%pI4:%u-%u\n",
+						&rtp_exp->tuple.src.u3.ip,
+						ntohs(rtp_exp->tuple.src.u.udp.port),
+						ntohs(rtcp_exp->tuple.src.u.udp.port),
+						&rtp_exp->tuple.dst.u3.ip,
+						ntohs(rtp_exp->tuple.dst.u.udp.port),
+						ntohs(rtcp_exp->tuple.dst.u.udp.port));
 				break;
 			}
-		}
-		for (hicport = prtspexp->hicport; hicport != 0; hicport++) { /* XXX: improper wrap? */
-			rtp_t->dst.u.udp.port = htons(hicport);
-			if (nf_ct_expect_related(rtp_exp) == 0) {
-				pr_debug("using port %hu (2 of 2)\n", hicport);
-				break;
+			if(seekloport == 0) {				
+				nf_ct_unexpect_related(rtp_exp);
 			}
-		}
-		if (locport != 0 && hicport != 0) {
-			rbuf1len = sprintf(rbuf1, "%hu", locport);
-			rbufalen = sprintf(rbufa, hicport == locport+1 ?
-					   "%hu-%hu":"%hu/%hu", locport, hicport);
-		}
-		break;
+				
+			break;
+		case pb_discon:
+			for (seekloport = prtspexp->locport; seekloport != 0; seekloport++) { /* XXX: improper wrap? */
+				if ( dir == IP_CT_DIR_ORIGINAL ) 
+					rtp_t->dst.u.udp.port = htons(seekloport);
+				else
+					rtp_t->src.u.udp.port = htons(seekloport);
+
+				if (nf_ct_expect_related(rtp_exp) == 0) {
+					pr_debug("using port %hu (1 of 2)\n", seekloport);
+					seekloport = 0;
+					break;
+				}
+			}
+			for (seekhiport = prtspexp->hicport; seekhiport != 0; seekhiport++) { /* XXX: improper wrap? */
+				if ( dir == IP_CT_DIR_ORIGINAL ) 
+					rtp_t->dst.u.udp.port = htons(seekhiport);
+				else
+					rtp_t->src.u.udp.port = htons(seekhiport);
+				if (nf_ct_expect_related(rtp_exp) == 0) {
+					pr_debug("using port %hu (2 of 2)\n", seekhiport);
+					seekloport = 0;
+					break;
+				}
+			}
+			break;
+		
+		default:
+			seekloport=0;
+			seekhiport=0;
+			break;
 	}
 
-	if (rbuf1len == 0)
+	if (seekloport == 0)
 		return 0;   /* cannot get replacement port(s) */
 
 	/* Transport: tran;field;field=val,tran;field;field=val,...
@@ -355,6 +381,31 @@ rtsp_mangle_tran(enum ip_conntrack_info ctinfo,
 				char*     rbuf = rbuf1;
 				uint      rbuflen = rbuf1len;
 
+				seekloport = prtspexp->locport;
+				seekhiport = prtspexp->locport+1;
+	
+				switch (prtspexp->pbtype) {
+					case pb_single:
+						if (seekloport != 0) {
+							rbuf1len = sprintf(rbuf1, "%hu", seekloport);
+							rbufalen = sprintf(rbufa, "%hu", seekloport);
+						}
+						break;
+					case pb_range:
+						if (seekloport != 0) {
+							rbuf1len = sprintf(rbuf1, "%hu", seekloport);
+							rbufalen = sprintf(rbufa, "%hu-%hu", seekloport, seekhiport);
+						}
+						break;
+					case pb_discon:
+						if (seekloport != 0 && seekhiport != 0) {
+							rbuf1len = sprintf(rbuf1, "%hu", seekloport);
+							rbufalen = sprintf(rbufa, seekhiport == seekloport+1 ?
+									"%hu-%hu":"%hu/%hu", seekloport, seekhiport);
+						}
+						break;
+				}
+
 				off += 12;
 				origoff = (ptran-ptcp)+off;
 				origlen = 0;
@@ -403,6 +454,45 @@ rtsp_mangle_tran(enum ip_conntrack_info ctinfo,
 				}
 			}
 
+
+			if (strncmp(ptran+off, "source=", 7) == 0) {
+				uint dstoff = (ptran-ptcp)+off;
+				uint dstlen = nextfieldoff-off;
+				char* pdstrep = NULL;
+				uint dstreplen = 0;
+				diff = dstlen;
+				pr_debug("RTSP: replace src addr\n");
+				dstoff += 7;
+				dstlen -= 8;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
+				newip = ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.u3;
+#else
+				newip = ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.u3.ip;
+#endif
+				extaddrlen = sprintf(szextaddr, "%pI4", &newip);
+				pr_debug("source=%s\n", szextaddr);
+				pdstrep = szextaddr;
+				dstreplen = extaddrlen;
+				diff = nextfieldoff-off-8-extaddrlen;
+
+				if (!nf_nat_mangle_tcp_packet(skb, ct, ctinfo,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
+							0, 
+#endif
+							dstoff, dstlen, pdstrep, dstreplen)) {
+					/* mangle failed, all we can do is bail */
+					pr_debug("MANGLE FAILED! bail expectations.");
+					nf_ct_unexpect_related(rtp_exp);
+					if (rtcp_exp)
+						nf_ct_unexpect_related(rtcp_exp);
+					return 0;
+				}
+				get_skb_tcpdata(skb, &ptcp, &tcplen);
+				ptran = ptcp+tranoff;
+				tranlen -= diff;
+				nextparamoff -= diff;
+				nextfieldoff -= diff;
+			}
 			off = nextfieldoff;
 		}
 
@@ -468,6 +558,7 @@ help_out(struct sk_buff *skb, enum ip_conntrack_info ctinfo,
 				pr_debug("hdr: Transport mangle failed");
 				break;
 			}
+				if ( dir == IP_CT_DIR_ORIGINAL ) {
 			rtp_exp->expectfn = nf_nat_rtsp_expected;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
 			rtp_exp->saved_addr = saddr;
@@ -485,6 +576,7 @@ help_out(struct sk_buff *skb, enum ip_conntrack_info ctinfo,
 #endif
 				rtcp_exp->saved_proto.udp.port = htons(prtspexp->hicport);
 				rtcp_exp->dir = !dir;
+				}
 			}
 			get_skb_tcpdata(skb, &ptcp, &tcplen);
 			hdrslen -= (oldtcplen-tcplen);
@@ -522,8 +614,14 @@ nf_nat_rtsp(struct sk_buff *skb, enum ip_conntrack_info ctinfo,
 #endif
 		break;
 	case IP_CT_DIR_REPLY:
-		pr_debug("unmangle ! %u\n", ctinfo);
-		/* XXX: unmangle */
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
+		rc = help_out(skb, ctinfo, protoff, matchoff, matchlen, prtspexp,
+				rtp_exp, rtcp_exp);
+#else
+		rc = help_out(skb, ctinfo, matchoff, matchlen, prtspexp,
+				rtp_exp, rtcp_exp);
+#endif
 		rc = NF_ACCEPT;
 		break;
 	}
@@ -563,14 +661,14 @@ static void nf_nat_rtsp_expected(struct nf_conn* ct, struct nf_conntrack_expect 
 	 * actually came from the same source. */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,7,0)
 	if (nf_inet_addr_cmp(&ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3,
-			     &ct->master->tuplehash[exp->dir].tuple.src.u3)) {
+			     &ct->master->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3)) {
 		range.min_addr = range.max_addr
-			= ct->master->tuplehash[!exp->dir].tuple.dst.u3;
+			= ct->master->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u3;
 #else
 	if (ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3.ip ==
-	    ct->master->tuplehash[exp->dir].tuple.src.u3.ip) {
+	    ct->master->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src.u3.ip) {
 		range.min_ip = range.max_ip
-			= ct->master->tuplehash[!exp->dir].tuple.dst.u3.ip;
+			= ct->master->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u3.ip;
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,3,0)
 		range.flags = NF_NAT_RANGE_MAP_IPS;
